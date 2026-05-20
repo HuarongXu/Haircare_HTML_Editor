@@ -7,6 +7,10 @@ const PORT = 9001;
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
+// Store original <script> blocks per file so we can restore them if save loses them
+const originalScriptsMap = new Map();
+const SCRIPT_RE = /<script\b(?![^>]*id\s*=\s*["']__visual_editor_script__)[^>]*>[\s\S]*?<\/script>/gi;
+
 // Serve editor page
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'visual-editor.html')));
 
@@ -18,6 +22,12 @@ app.get('/preview', (req, res) => {
   if (!fs.existsSync(resolved)) return res.status(404).send('File not found');
 
   let html = fs.readFileSync(resolved, 'utf-8');
+
+  // Remember original <script> blocks (excluding editor script)
+  const origScripts = html.match(SCRIPT_RE) || [];
+  if (origScripts.length > 0) {
+    originalScriptsMap.set(resolved, origScripts);
+  }
 
   // Inject editing helper script before </body>
   const editScript = `
@@ -96,7 +106,25 @@ app.get('/preview', (req, res) => {
       window.parent.postMessage({ type: 'slide-info', current: currentSlideIndex + 1, total: slides.length }, '*');
     }
   }
-  window.addEventListener('load', function() { setTimeout(reportSlideInfo, 300); });
+  var hasDeckNav = false;
+  window.addEventListener('load', function() {
+    setTimeout(reportSlideInfo, 300);
+    // For transform-based decks: let the original JS handle navigation
+    var deck = document.getElementById('deck');
+    if (deck && window.getComputedStyle(deck).display === 'flex') {
+      hasDeckNav = true;
+      // Sync editor slide indicator when original JS navigates
+      var observer = new MutationObserver(function() {
+        var transform = deck.style.transform || '';
+        var match = transform.match(/translateX\\(-?(\\d+)/);
+        if (match) {
+          currentSlideIndex = Math.round(parseInt(match[1]) / 100);
+          reportSlideInfo();
+        }
+      });
+      observer.observe(deck, { attributes: true, attributeFilter: ['style'] });
+    }
+  });
 
   function getComputedFontSize(el) {
     return window.getComputedStyle(el).fontSize;
@@ -195,6 +223,8 @@ app.get('/preview', (req, res) => {
       var clone = document.documentElement.cloneNode(true);
       var sc = clone.querySelector('#__visual_editor_script__');
       if (sc) sc.remove();
+      var es = clone.querySelector('#__visual_editor_style__');
+      if (es) es.remove();
       var ov = clone.querySelector('#__editor_overlay__');
       if (ov) ov.remove();
       var lb = clone.querySelector('#__editor_label__');
@@ -205,6 +235,12 @@ app.get('/preview', (req, res) => {
         el.style.removeProperty('visibility');
         if (!el.getAttribute('style')) el.removeAttribute('style');
       });
+      var deckClone = clone.querySelector('#deck');
+      if (deckClone) {
+        deckClone.style.removeProperty('transform');
+        deckClone.style.removeProperty('transition');
+        if (!deckClone.getAttribute('style')) deckClone.removeAttribute('style');
+      }
       window.parent.postMessage({ type: 'html-content', html: '<!DOCTYPE html>\\n' + clone.outerHTML }, '*');
     }
 
@@ -214,10 +250,32 @@ app.get('/preview', (req, res) => {
       if (slides.length <= 1) return;
       if (d.dir === 'next') currentSlideIndex = Math.min(currentSlideIndex + 1, slides.length - 1);
       else if (d.dir === 'prev') currentSlideIndex = Math.max(currentSlideIndex - 1, 0);
-      slides.forEach(function(s, i) {
-        s.style.display = (i === currentSlideIndex) ? '' : 'none';
-        if (i === currentSlideIndex) s.style.visibility = 'visible';
-      });
+      if (hasDeckNav) {
+        // Directly control deck transform, bypassing pipeline step logic
+        var deck = document.getElementById('deck');
+        deck.style.transform = 'translateX(-' + (currentSlideIndex * 100) + 'vw)';
+        // Sync nav dots
+        var navEl = document.getElementById('nav');
+        if (navEl) {
+          navEl.querySelectorAll('.dot').forEach(function(dot, i) {
+            dot.classList.toggle('active', i === currentSlideIndex);
+          });
+        }
+        // Sync original JS state and trigger animations
+        window.__currentSlideIndex = currentSlideIndex;
+        if (window.__playSlide) window.__playSlide(currentSlideIndex);
+        // Update theme
+        var el = slides[currentSlideIndex];
+        if (el) {
+          var isLight = el.classList.contains('light');
+          document.body.classList.toggle('light-bg', isLight);
+        }
+      } else {
+        slides.forEach(function(s, i) {
+          s.style.display = (i === currentSlideIndex) ? '' : 'none';
+          if (i === currentSlideIndex) s.style.visibility = 'visible';
+        });
+      }
       window.scrollTo(0, 0);
       reportSlideInfo();
     }
@@ -265,10 +323,15 @@ app.get('/preview', (req, res) => {
       } else {
         return;
       }
-      getSlides().forEach(function(s, i) {
-        s.style.display = (i === currentSlideIndex) ? '' : 'none';
-        if (i === currentSlideIndex) s.style.visibility = 'visible';
-      });
+      if (hasDeckNav) {
+        var deck = document.getElementById('deck');
+        deck.style.transform = 'translateX(-' + (currentSlideIndex * 100) + 'vw)';
+      } else {
+        getSlides().forEach(function(s, i) {
+          s.style.display = (i === currentSlideIndex) ? '' : 'none';
+          if (i === currentSlideIndex) s.style.visibility = 'visible';
+        });
+      }
       window.scrollTo(0, 0);
       reportSlideInfo();
       window.parent.postMessage({ type: 'content-changed' }, '*');
@@ -278,6 +341,10 @@ app.get('/preview', (req, res) => {
 </script>`;
 
   html = html.replace(/<\/body>/i, editScript + '\n</body>');
+
+  // Force all animated elements visible in editor (they default to opacity:0 waiting for JS animation)
+  const editorCSS = `<style id="__visual_editor_style__">[data-anim],[data-anim="left"],[data-anim="right"],[data-anim="line"],[data-anim="step"]{opacity:1!important;transform:none!important;transition:none!important;}</style>`;
+  html = html.replace(/<\/head>/i, editorCSS + '\n</head>');
   res.type('html').send(html);
 });
 
@@ -286,11 +353,22 @@ app.post('/api/save', (req, res) => {
   const { filePath, html } = req.body;
   if (!filePath || !html) return res.status(400).json({ error: 'Missing data' });
   const resolved = path.resolve(filePath);
+
+  // Always strip all scripts from client HTML, then re-inject originals from when file was loaded.
+  // Browser DOM serialization (cloneNode+outerHTML) is unreliable for <script> preservation.
+  let finalHtml = html.replace(SCRIPT_RE, '');
+  const origScripts = originalScriptsMap.get(resolved) || [];
+  const restored = origScripts.length > 0;
+  if (restored) {
+    console.log(`[save] Re-injecting ${origScripts.length} original <script> block(s) for ${path.basename(resolved)}`);
+    finalHtml = finalHtml.replace(/<\/body>/i, origScripts.join('\n') + '\n</body>');
+  }
+
   if (fs.existsSync(resolved)) {
     fs.copyFileSync(resolved, resolved + '.bak');
   }
-  fs.writeFileSync(resolved, html, 'utf-8');
-  res.json({ success: true });
+  fs.writeFileSync(resolved, finalHtml, 'utf-8');
+  res.json({ success: true, scriptsRestored: restored });
 });
 
 // Browse directory

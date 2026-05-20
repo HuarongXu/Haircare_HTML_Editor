@@ -208,7 +208,7 @@
       });
       var data = await res.json();
       if (!res.ok) throw new Error(data.error);
-      setStatus('Saved ✓ (.bak)', '#10b981');
+      setStatus(data.scriptsRestored ? 'Saved ✓ (scripts restored)' : 'Saved ✓ (.bak)', '#10b981');
     } catch (e) {
       setStatus('Error: ' + e.message, '#ef4444');
     }
