@@ -241,6 +241,12 @@ app.get('/preview', (req, res) => {
         deckClone.style.removeProperty('transition');
         if (!deckClone.getAttribute('style')) deckClone.removeAttribute('style');
       }
+      // Clean up dynamically generated DOM elements that original JS will recreate
+      // 1. Nav dots — original scripts re-create them via slides.forEach
+      var navClone = clone.querySelector('#nav');
+      if (navClone) navClone.innerHTML = '';
+      // 2. Overview panel — original scripts re-create it dynamically
+      clone.querySelectorAll('#overview').forEach(function(el) { el.remove(); });
       window.parent.postMessage({ type: 'html-content', html: '<!DOCTYPE html>\\n' + clone.outerHTML }, '*');
     }
 
