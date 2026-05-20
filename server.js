@@ -24,6 +24,52 @@ app.get('/preview', (req, res) => {
 <script id="__visual_editor_script__">
 (function() {
   var selected = null;
+  var undoStack = [];
+  var MAX_UNDO = 50;
+
+  function getBodySnapshot() {
+    var clone = document.body.cloneNode(true);
+    var sc = clone.querySelector('#__visual_editor_script__');
+    if (sc) sc.remove();
+    var ov = clone.querySelector('#__editor_overlay__');
+    if (ov) ov.remove();
+    var lb = clone.querySelector('#__editor_label__');
+    if (lb) lb.remove();
+    clone.querySelectorAll('[contenteditable]').forEach(function(el) { el.removeAttribute('contenteditable'); });
+    return clone.innerHTML;
+  }
+
+  function saveUndoSnapshot() {
+    undoStack.push(getBodySnapshot());
+    if (undoStack.length > MAX_UNDO) undoStack.shift();
+    reportUndoStatus();
+  }
+
+  function performUndo() {
+    if (undoStack.length === 0) return;
+    var snapshot = undoStack.pop();
+    clearSelection();
+    // Detach editor elements before replacing body content
+    var edScript = document.getElementById('__visual_editor_script__');
+    var edOverlay = document.getElementById('__editor_overlay__');
+    var edLabel = document.getElementById('__editor_label__');
+    if (edScript) edScript.parentNode.removeChild(edScript);
+    if (edOverlay) edOverlay.parentNode.removeChild(edOverlay);
+    if (edLabel) edLabel.parentNode.removeChild(edLabel);
+    // Restore body content
+    document.body.innerHTML = snapshot;
+    // Re-attach editor elements (use closure refs which are same objects)
+    document.body.appendChild(overlay);
+    document.body.appendChild(label);
+    if (edScript) document.body.appendChild(edScript);
+    reportUndoStatus();
+    reportSlideInfo();
+    window.parent.postMessage({ type: 'content-changed' }, '*');
+  }
+
+  function reportUndoStatus() {
+    window.parent.postMessage({ type: 'undo-status', count: undoStack.length }, '*');
+  }
 
   // --- UI overlays ---
   var overlay = document.createElement('div');
@@ -99,14 +145,22 @@ app.get('/preview', (req, res) => {
     e.preventDefault();
     e.stopPropagation();
     if (!selected) return;
+    saveUndoSnapshot();
     selected.contentEditable = 'true';
     selected.focus();
     selected.style.outline = '2px dashed #f59e0b';
+    var textBefore = selected.innerHTML;
     selected.addEventListener('blur', function handler() {
       selected.contentEditable = 'false';
       selected.style.outline = '';
       selected.removeEventListener('blur', handler);
-      window.parent.postMessage({ type: 'content-changed' }, '*');
+      if (selected.innerHTML !== textBefore) {
+        window.parent.postMessage({ type: 'content-changed' }, '*');
+      } else {
+        // No change — remove the snapshot we saved
+        undoStack.pop();
+        reportUndoStatus();
+      }
     }, { once: true });
   }, true);
 
@@ -114,9 +168,14 @@ app.get('/preview', (req, res) => {
   document.addEventListener('keydown', function(e) {
     if (e.key === 'Delete' && selected && selected.contentEditable !== 'true') {
       e.preventDefault();
+      saveUndoSnapshot();
       selected.remove();
       clearSelection();
       window.parent.postMessage({ type: 'content-changed' }, '*');
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
+      e.preventDefault();
+      performUndo();
     }
   });
 
@@ -132,7 +191,6 @@ app.get('/preview', (req, res) => {
 
     // GET HTML for saving
     if (d.type === 'get-html') {
-      getSlides().forEach(function(s) { s.style.display = ''; s.style.visibility = ''; });
       clearSelection();
       var clone = document.documentElement.cloneNode(true);
       var sc = clone.querySelector('#__visual_editor_script__');
@@ -164,9 +222,15 @@ app.get('/preview', (req, res) => {
       reportSlideInfo();
     }
 
+    // UNDO
+    if (d.type === 'undo') {
+      performUndo();
+    }
+
     // FONT SIZE CHANGE
     if (d.type === 'change-font-size') {
       if (!selected) return;
+      saveUndoSnapshot();
       var current = parseFloat(getComputedFontSize(selected));
       if (d.delta === 0) {
         selected.style.fontSize = '';
@@ -189,6 +253,7 @@ app.get('/preview', (req, res) => {
     if (d.type === 'slide-reorder') {
       var slides = getSlides();
       if (slides.length <= 1) return;
+      saveUndoSnapshot();
       var idx = currentSlideIndex;
       var slide = slides[idx];
       if (d.dir === 'up' && idx > 0) {
