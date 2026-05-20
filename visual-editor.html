@@ -95,6 +95,23 @@
     </div>
 
     <div class="help-section">
+      <h3>Font Weight</h3>
+      <div style="display:flex;gap:6px;align-items:center;margin-bottom:8px;">
+        <button class="btn-action" onclick="toggleBold()" style="padding:3px 10px;font-size:13px;font-weight:bold;">B</button>
+        <span style="font-size:11px;color:#94a3b8;">Toggle bold on selected</span>
+      </div>
+    </div>
+
+    <div class="help-section">
+      <h3>Drag Move</h3>
+      <div style="display:flex;gap:6px;align-items:center;margin-bottom:8px;">
+        <button class="btn-warn" id="drag-toggle-btn" onclick="toggleDragMode()" style="padding:3px 10px;font-size:12px;">🔒 Drag Off</button>
+        <span style="font-size:11px;color:#94a3b8;">Enable to drag elements</span>
+      </div>
+      <p style="font-size:11px;color:#94a3b8;">When on, drag selected element to reposition. Uses CSS transform.</p>
+    </div>
+
+    <div class="help-section">
       <h3>Slide Order</h3>
       <div style="display:flex;gap:6px;align-items:center;margin-bottom:8px;">
         <button class="btn-warn" onclick="slideReorder('up')" style="padding:3px 10px;font-size:12px;" title="Move current slide earlier">⬆ Move Up</button>
@@ -111,6 +128,8 @@
       <div class="help-item"><span class="help-key">Ctrl+Z</span> Undo last change</div>
       <div class="help-item"><span class="help-key">◀ ▶</span> Navigate slides</div>
       <div class="help-item"><span class="help-key">A+ A-</span> Adjust font size</div>
+      <div class="help-item"><span class="help-key">B</span> Toggle bold</div>
+      <div class="help-item"><span class="help-key">Drag</span> Move element position</div>
       <div class="help-item"><span class="help-key">⬆ ⬇</span> Reorder slides</div>
       <div class="help-item"><span class="help-key">💾 Save</span> Save (.bak backup)</div>
     </div>
@@ -166,6 +185,11 @@
       document.getElementById('sel-class').textContent = e.data.classes || '—';
       document.getElementById('sel-text').textContent = e.data.text || '—';
       document.getElementById('sel-fontsize').textContent = e.data.fontSize || '—';
+    }
+    if (e.data.type === 'drag-mode-changed') {
+      var btn = document.getElementById('drag-toggle-btn');
+      btn.textContent = e.data.on ? '✋ Drag On' : '🔒 Drag Off';
+      btn.style.background = e.data.on ? '#ef4444' : '';
     }
     if (e.data.type === 'undo-status') {
       var btn = document.getElementById('undo-btn');
@@ -295,6 +319,16 @@
   // Font size change
   function changeFontSize(delta) {
     iframe.contentWindow.postMessage({ type: 'change-font-size', delta: delta }, '*');
+  }
+
+  // Bold toggle
+  function toggleBold() {
+    iframe.contentWindow.postMessage({ type: 'toggle-bold' }, '*');
+  }
+
+  // Drag mode toggle
+  function toggleDragMode() {
+    iframe.contentWindow.postMessage({ type: 'toggle-drag' }, '*');
   }
 
   // Slide reorder

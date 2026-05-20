@@ -164,6 +164,7 @@ app.get('/preview', (req, res) => {
   document.addEventListener('click', function(e) {
     if (e.target.id === '__editor_overlay__' || e.target.id === '__editor_label__') return;
     if (e.target.tagName === 'A' || e.target.closest('a')) e.preventDefault();
+    if (dragMode && selected) return; // In drag mode, don't re-select on click
     e.stopPropagation();
     selectEl(e.target);
   }, true);
@@ -204,6 +205,73 @@ app.get('/preview', (req, res) => {
     if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
       e.preventDefault();
       performUndo();
+    }
+  });
+
+  // --- Drag-and-drop positioning ---
+  var dragMode = false;
+  var dragging = false;
+  var dragStartX = 0, dragStartY = 0;
+  var dragOrigTransform = '';
+  var dragOrigX = 0, dragOrigY = 0;
+
+  function parseDragTranslate(el) {
+    var t = el.style.transform || '';
+    var re = /translate\(([^,]+),\s*([^)]+)\)/;
+    var m = t.match(re);
+    if (m) return { x: parseFloat(m[1]) || 0, y: parseFloat(m[2]) || 0, rest: t.replace(re, '').trim() };
+    return { x: 0, y: 0, rest: t === 'none' ? '' : t };
+  }
+
+  function applyDragTransform(el, x, y, rest) {
+    var tr = 'translate(' + x + 'px, ' + y + 'px)';
+    if (rest && rest.trim()) tr += ' ' + rest.trim();
+    // Use !important to override the editor CSS that sets transform:none!important on [data-anim]
+    el.style.setProperty('transform', tr, 'important');
+  }
+
+  document.addEventListener('mousedown', function(e) {
+    if (!dragMode || !selected) return;
+    if (e.target.id === '__editor_overlay__' || e.target.id === '__editor_label__') return;
+    if (selected.contentEditable === 'true') return;
+    e.preventDefault();
+    dragging = true;
+    dragStartX = e.clientX;
+    dragStartY = e.clientY;
+    var parsed = parseDragTranslate(selected);
+    dragOrigX = parsed.x;
+    dragOrigY = parsed.y;
+    dragOrigTransform = parsed.rest;
+    saveUndoSnapshot();
+  });
+
+  document.addEventListener('mousemove', function(e) {
+    if (!dragging || !selected) return;
+    var dx = e.clientX - dragStartX;
+    var dy = e.clientY - dragStartY;
+    applyDragTransform(selected, dragOrigX + dx, dragOrigY + dy, dragOrigTransform);
+    // Update overlay position
+    var r = selected.getBoundingClientRect();
+    overlay.style.left = r.left + 'px';
+    overlay.style.top = r.top + 'px';
+    overlay.style.width = r.width + 'px';
+    overlay.style.height = r.height + 'px';
+    label.style.left = r.left + 'px';
+    label.style.top = Math.max(0, r.top - 20) + 'px';
+  });
+
+  document.addEventListener('mouseup', function(e) {
+    if (!dragging) return;
+    dragging = false;
+    if (selected) {
+      var parsed = parseDragTranslate(selected);
+      if (parsed.x === dragOrigX && parsed.y === dragOrigY) {
+        // No actual move — remove the snapshot
+        undoStack.pop();
+        reportUndoStatus();
+      } else {
+        window.parent.postMessage({ type: 'content-changed' }, '*');
+      }
     }
   });
 
@@ -260,13 +328,6 @@ app.get('/preview', (req, res) => {
         // Directly control deck transform, bypassing pipeline step logic
         var deck = document.getElementById('deck');
         deck.style.transform = 'translateX(-' + (currentSlideIndex * 100) + 'vw)';
-        // Sync nav dots
-        var navEl = document.getElementById('nav');
-        if (navEl) {
-          navEl.querySelectorAll('.dot').forEach(function(dot, i) {
-            dot.classList.toggle('active', i === currentSlideIndex);
-          });
-        }
         // Sync original JS state and trigger animations
         window.__currentSlideIndex = currentSlideIndex;
         if (window.__playSlide) window.__playSlide(currentSlideIndex);
@@ -311,6 +372,23 @@ app.get('/preview', (req, res) => {
         fontSize: getComputedFontSize(selected)
       }, '*');
       window.parent.postMessage({ type: 'content-changed' }, '*');
+    }
+
+    // TOGGLE BOLD
+    if (d.type === 'toggle-bold') {
+      if (!selected) return;
+      saveUndoSnapshot();
+      var cw = window.getComputedStyle(selected).fontWeight;
+      var isBold = cw === 'bold' || cw === '700' || cw === '800' || cw === '900' || parseInt(cw) >= 700;
+      selected.style.fontWeight = isBold ? 'normal' : 'bold';
+      window.parent.postMessage({ type: 'content-changed' }, '*');
+    }
+
+    // TOGGLE DRAG MODE
+    if (d.type === 'toggle-drag') {
+      dragMode = !dragMode;
+      document.body.style.cursor = dragMode ? 'move' : '';
+      window.parent.postMessage({ type: 'drag-mode-changed', on: dragMode }, '*');
     }
 
     // SLIDE REORDER
