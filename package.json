@@ -1,0 +1,12 @@
+{
+  "name": "haircare-html-editor",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Visual HTML slide editor — click to select, double-click to edit, navigate & reorder slides",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0"
+  }
+}

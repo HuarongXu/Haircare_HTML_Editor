@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <title>Visual HTML Editor</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0f172a; color: #e2e8f0; display: flex; flex-direction: column; height: 100vh; }
+
+    /* Top bar */
+    #top-bar {
+      display: flex; align-items: center; gap: 10px;
+      padding: 6px 12px; background: #1e293b; border-bottom: 1px solid #334155; height: 44px; flex-shrink: 0;
+    }
+    #top-bar button {
+      padding: 5px 14px; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; font-weight: 500;
+    }
+    .btn-open { background: #334155; color: #e2e8f0; }
+    .btn-open:hover { background: #475569; }
+    .btn-save { background: #10b981; color: #fff; }
+    .btn-save:hover { background: #34d399; }
+    .btn-action { background: #6366f1; color: #fff; }
+    .btn-action:hover { background: #818cf8; }
+    .btn-warn { background: #f59e0b; color: #000; }
+    .btn-warn:hover { background: #fbbf24; }
+    #file-display { flex: 1; font-size: 12px; color: #94a3b8; font-family: Consolas, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #status { font-size: 12px; min-width: 100px; text-align: right; }
+
+    /* Main area */
+    #main { display: flex; flex: 1; overflow: hidden; }
+
+    /* Preview iframe */
+    #preview-frame { flex: 1; border: none; background: #fff; }
+
+    /* Info panel */
+    #info-panel {
+      width: 260px; background: #1e293b; border-left: 1px solid #334155;
+      padding: 12px; overflow-y: auto; flex-shrink: 0; font-size: 13px;
+    }
+    #info-panel h3 { font-size: 14px; color: #6366f1; margin-bottom: 8px; }
+    .info-row { margin-bottom: 6px; }
+    .info-label { color: #94a3b8; font-size: 11px; }
+    .info-value { color: #e2e8f0; font-size: 13px; word-break: break-all; }
+    .help-section { margin-top: 16px; padding-top: 12px; border-top: 1px solid #334155; }
+    .help-item { display: flex; gap: 8px; margin-bottom: 6px; font-size: 12px; color: #94a3b8; }
+    .help-key { background: #334155; padding: 1px 6px; border-radius: 3px; color: #e2e8f0; font-family: Consolas, monospace; white-space: nowrap; }
+
+    /* File browser modal */
+    .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 100; justify-content: center; align-items: center; }
+    .modal-overlay.active { display: flex; }
+    .modal { background: #1e293b; border-radius: 8px; width: 600px; max-height: 70vh; box-shadow: 0 20px 60px rgba(0,0,0,0.5); overflow: hidden; }
+    .modal-header { padding: 10px 14px; background: #0f172a; color: #e2e8f0; display: flex; justify-content: space-between; align-items: center; font-size: 13px; }
+    .modal-close { background: none; border: none; color: #94a3b8; font-size: 20px; cursor: pointer; }
+    .modal-body { max-height: 55vh; overflow-y: auto; }
+    .file-item { padding: 7px 14px; cursor: pointer; display: flex; align-items: center; gap: 8px; color: #cbd5e1; font-size: 13px; font-family: Consolas, monospace; }
+    .file-item:hover { background: #334155; }
+    .file-item.dir { color: #60a5fa; }
+    .file-item.html { color: #f472b6; }
+  </style>
+</head>
+<body>
+
+<div id="top-bar">
+  <button class="btn-open" onclick="openBrowser()">📁 Open</button>
+  <span id="file-display">No file loaded</span>
+  <div style="display:flex;align-items:center;gap:4px;">
+    <button class="btn-action" onclick="slideNav('prev')" title="Previous slide">◀</button>
+    <span id="slide-indicator" style="font-size:12px;color:#e2e8f0;min-width:60px;text-align:center;">—</span>
+    <button class="btn-action" onclick="slideNav('next')" title="Next slide">▶</button>
+  </div>
+  <button class="btn-save" onclick="saveFile()">💾 Save</button>
+  <span id="status" style="color:#94a3b8">Ready</span>
+</div>
+
+<div id="main">
+  <iframe id="preview-frame"></iframe>
+  <div id="info-panel">
+    <h3>Selected Element</h3>
+    <div class="info-row"><div class="info-label">Tag</div><div class="info-value" id="sel-tag">—</div></div>
+    <div class="info-row"><div class="info-label">Class</div><div class="info-value" id="sel-class">—</div></div>
+    <div class="info-row"><div class="info-label">Text</div><div class="info-value" id="sel-text">—</div></div>
+    <div class="info-row"><div class="info-label">Font Size</div><div class="info-value" id="sel-fontsize">—</div></div>
+
+    <div class="help-section">
+      <h3>Font Size</h3>
+      <div style="display:flex;gap:6px;align-items:center;margin-bottom:8px;">
+        <button class="btn-action" onclick="changeFontSize(-1)" style="padding:3px 10px;font-size:14px;font-weight:bold;">A-</button>
+        <button class="btn-action" onclick="changeFontSize(1)" style="padding:3px 10px;font-size:14px;font-weight:bold;">A+</button>
+        <button class="btn-open" onclick="changeFontSize(0)" style="padding:3px 10px;font-size:11px;">Reset</button>
+      </div>
+    </div>
+
+    <div class="help-section">
+      <h3>Slide Order</h3>
+      <div style="display:flex;gap:6px;align-items:center;margin-bottom:8px;">
+        <button class="btn-warn" onclick="slideReorder('up')" style="padding:3px 10px;font-size:12px;" title="Move current slide earlier">⬆ Move Up</button>
+        <button class="btn-warn" onclick="slideReorder('down')" style="padding:3px 10px;font-size:12px;" title="Move current slide later">⬇ Move Down</button>
+      </div>
+      <p style="font-size:11px;color:#94a3b8;">Move the current slide before or after its neighbor.</p>
+    </div>
+
+    <div class="help-section">
+      <h3>How to Edit</h3>
+      <div class="help-item"><span class="help-key">Click</span> Select element</div>
+      <div class="help-item"><span class="help-key">Double-click</span> Edit text</div>
+      <div class="help-item"><span class="help-key">Delete</span> Remove element</div>
+      <div class="help-item"><span class="help-key">◀ ▶</span> Navigate slides</div>
+      <div class="help-item"><span class="help-key">A+ A-</span> Adjust font size</div>
+      <div class="help-item"><span class="help-key">⬆ ⬇</span> Reorder slides</div>
+      <div class="help-item"><span class="help-key">💾 Save</span> Save (.bak backup)</div>
+    </div>
+
+    <div class="help-section">
+      <h3>Tips</h3>
+      <p style="font-size:12px;color:#94a3b8;line-height:1.5;">
+        Click any element to select (purple border). Double-click to edit text inline. Press Delete to remove.
+        Use ⬆⬇ to rearrange slide order. Save writes back with .bak backup.
+      </p>
+    </div>
+  </div>
+</div>
+
+<!-- File browser modal -->
+<div class="modal-overlay" id="browser-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <span id="browser-path">Select HTML File</span>
+      <button class="modal-close" onclick="closeBrowser()">&times;</button>
+    </div>
+    <div class="modal-body" id="browser-list"></div>
+  </div>
+</div>
+
+<script>
+  var currentFilePath = '';
+  var iframe = document.getElementById('preview-frame');
+
+  function setStatus(msg, color) {
+    var el = document.getElementById('status');
+    el.textContent = msg;
+    el.style.color = color || '#94a3b8';
+  }
+
+  // Listen for messages from iframe
+  window.addEventListener('message', function(e) {
+    if (!e.data || !e.data.type) return;
+    if (e.data.type === 'element-selected') {
+      document.getElementById('sel-tag').textContent = e.data.tag || '—';
+      document.getElementById('sel-class').textContent = e.data.classes || '—';
+      document.getElementById('sel-text').textContent = e.data.text || '—';
+      document.getElementById('sel-fontsize').textContent = e.data.fontSize || '—';
+    }
+    if (e.data.type === 'content-changed') {
+      setStatus('Modified *', '#f59e0b');
+    }
+    if (e.data.type === 'html-content') {
+      doSave(e.data.html);
+    }
+    if (e.data.type === 'slide-info') {
+      document.getElementById('slide-indicator').textContent = e.data.current + ' / ' + e.data.total;
+    }
+  });
+
+  // Load file into iframe
+  function loadFile(filePath) {
+    currentFilePath = filePath;
+    document.getElementById('file-display').textContent = filePath;
+    iframe.src = '/preview?path=' + encodeURIComponent(filePath);
+    setStatus('Loaded ✓', '#10b981');
+  }
+
+  // Save
+  function saveFile() {
+    if (!currentFilePath) return setStatus('Open a file first', '#f59e0b');
+    iframe.contentWindow.postMessage({ type: 'get-html' }, '*');
+    setStatus('Saving...', '#60a5fa');
+  }
+
+  async function doSave(html) {
+    try {
+      var res = await fetch('/api/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filePath: currentFilePath, html: html })
+      });
+      var data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      setStatus('Saved ✓ (.bak)', '#10b981');
+    } catch (e) {
+      setStatus('Error: ' + e.message, '#ef4444');
+    }
+  }
+
+  // File browser
+  function openBrowser() {
+    document.getElementById('browser-modal').classList.add('active');
+    browseTo('C:\\0.Local');
+  }
+  function closeBrowser() {
+    document.getElementById('browser-modal').classList.remove('active');
+  }
+
+  async function browseTo(dir) {
+    try {
+      var res = await fetch('/api/browse?dir=' + encodeURIComponent(dir));
+      var data = await res.json();
+      document.getElementById('browser-path').textContent = data.dir;
+      var list = document.getElementById('browser-list');
+      list.innerHTML = '';
+
+      if (data.parent !== data.dir) {
+        var el = document.createElement('div');
+        el.className = 'file-item dir';
+        el.innerHTML = '⬆️ ..';
+        el.onclick = function() { browseTo(data.parent); };
+        list.appendChild(el);
+      }
+
+      data.items.forEach(function(item) {
+        var isHtml = !item.isDir && /\.html?$/i.test(item.name);
+        if (!item.isDir && !isHtml) return;
+        var el = document.createElement('div');
+        el.className = 'file-item' + (item.isDir ? ' dir' : ' html');
+        el.innerHTML = (item.isDir ? '📁 ' : '📄 ') + item.name;
+        el.onclick = function() {
+          if (item.isDir) { browseTo(item.path); }
+          else { closeBrowser(); loadFile(item.path); }
+        };
+        list.appendChild(el);
+      });
+    } catch(e) { console.error(e); }
+  }
+
+  document.getElementById('browser-modal').addEventListener('click', function(e) {
+    if (e.target === e.currentTarget) closeBrowser();
+  });
+
+  // Slide navigation
+  function slideNav(dir) {
+    if (!currentFilePath) return;
+    iframe.contentWindow.postMessage({ type: 'slide-nav', dir: dir }, '*');
+  }
+
+  // Font size change
+  function changeFontSize(delta) {
+    iframe.contentWindow.postMessage({ type: 'change-font-size', delta: delta }, '*');
+  }
+
+  // Slide reorder
+  function slideReorder(dir) {
+    if (!currentFilePath) return;
+    iframe.contentWindow.postMessage({ type: 'slide-reorder', dir: dir }, '*');
+  }
+</script>
+</body>
+</html>
