@@ -215,6 +215,26 @@ app.get('/preview', (req, res) => {
   var dragOrigTransform = '';
   var dragOrigX = 0, dragOrigY = 0;
 
+  // Find a meaningful draggable ancestor — skip tiny inline elements
+  function getDraggable(el) {
+    // Walk up to find a block-level or positioned element worth dragging
+    var cur = el;
+    while (cur && cur !== document.body && cur !== document.documentElement) {
+      var display = window.getComputedStyle(cur).display;
+      var isBlock = display === 'block' || display === 'flex' || display === 'grid' ||
+                    display === 'inline-block' || display === 'list-item';
+      // Stop at elements that have meaningful size (not tiny inline spans)
+      if (isBlock && cur.getBoundingClientRect().width > 40) return cur;
+      // Also stop at elements with an ID or class (likely intentional layout elements)
+      if (cur.id || (cur.className && typeof cur.className === 'string' && cur.className.trim())) {
+        var r = cur.getBoundingClientRect();
+        if (r.width > 30 && r.height > 20) return cur;
+      }
+      cur = cur.parentElement;
+    }
+    return el; // fallback to original
+  }
+
   function parseDragTranslate(el) {
     var t = el.style.transform || '';
     var re = /translate\(([^,]+),\s*([^)]+)\)/;
@@ -234,6 +254,12 @@ app.get('/preview', (req, res) => {
     if (!dragMode || !selected) return;
     if (e.target.id === '__editor_overlay__' || e.target.id === '__editor_label__') return;
     if (selected.contentEditable === 'true') return;
+    // Ensure we drag a meaningful block element, not a tiny inline span
+    var dragTarget = getDraggable(selected);
+    if (dragTarget !== selected) {
+      selected = dragTarget;
+      selectEl(dragTarget);
+    }
     e.preventDefault();
     dragging = true;
     dragStartX = e.clientX;
@@ -427,7 +453,9 @@ app.get('/preview', (req, res) => {
   html = html.replace(/<\/body>/i, editScript + '\n</body>');
 
   // Force all animated elements visible in editor (they default to opacity:0 waiting for JS animation)
-  const editorCSS = `<style id="__visual_editor_style__">[data-anim],[data-anim="left"],[data-anim="right"],[data-anim="line"],[data-anim="step"]{opacity:1!important;transform:none!important;transition:none!important;}</style>`;
+  // Only override opacity and transition — do NOT override transform as it breaks drag positioning
+  // and causes visual inconsistency between editor and direct HTML open
+  const editorCSS = `<style id="__visual_editor_style__">[data-anim],[data-anim="left"],[data-anim="right"],[data-anim="line"],[data-anim="step"]{opacity:1!important;transition:none!important;}</style>`;
   html = html.replace(/<\/head>/i, editorCSS + '\n</head>');
   res.type('html').send(html);
 });
@@ -458,9 +486,12 @@ app.post('/api/save', (req, res) => {
 // Browse directory
 app.get('/api/browse', (req, res) => {
   try {
-    const dir = req.query.dir || 'C:\\';
-    const resolved = path.resolve(dir);
-    if (!fs.existsSync(resolved)) return res.status(404).json({ error: 'Not found' });
+    let dir = req.query.dir || __dirname;
+    let resolved = path.resolve(dir);
+    if (!fs.existsSync(resolved)) {
+      resolved = __dirname;
+      dir = __dirname;
+    }
     const items = fs.readdirSync(resolved, { withFileTypes: true })
       .filter(d => !d.name.startsWith('.') && d.name !== 'node_modules' && d.name !== '.venv')
       .map(d => ({ name: d.name, isDir: d.isDirectory(), path: path.join(resolved, d.name) }))
