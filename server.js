@@ -1,6 +1,8 @@
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
+const puppeteer = require('puppeteer');
+const PptxGenJS = require('pptxgenjs');
 const app = express();
 const PORT = 9001;
 
@@ -499,6 +501,154 @@ app.get('/api/browse', (req, res) => {
     res.json({ dir: resolved, parent: path.dirname(resolved), items });
   } catch (e) {
     res.status(500).json({ error: e.message });
+  }
+});
+
+// --- Export helpers ---
+async function launchAndLoad(resolved) {
+  const browser = await puppeteer.launch({ headless: true, args: ['--no-sandbox', '--disable-web-security'] });
+  const page = await browser.newPage();
+  await page.setViewport({ width: 1920, height: 1080 });
+  const fileUrl = 'file:///' + resolved.replace(/\\/g, '/');
+  await page.goto(fileUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+  // Force all animated elements visible
+  await page.evaluate(() => {
+    document.querySelectorAll('[data-anim]').forEach(el => {
+      el.style.setProperty('opacity', '1', 'important');
+      el.style.setProperty('transition', 'none', 'important');
+    });
+    // Hide any nav/overview UI the page itself creates
+    document.querySelectorAll('#nav, #overview, .nav-dots').forEach(el => el.style.display = 'none');
+  });
+  await new Promise(r => setTimeout(r, 500));
+  return { browser, page };
+}
+
+async function screenshotAllSlides(page) {
+  const slideInfo = await page.evaluate(() => {
+    let slides = document.querySelectorAll('.slide, section.slide');
+    if (!slides.length) slides = document.querySelectorAll('section');
+    const deck = document.getElementById('deck');
+    const hasDeck = !!(deck && (window.getComputedStyle(deck).display === 'flex' || deck.style.transform));
+    return { count: slides.length, hasDeck };
+  });
+
+  const screenshots = [];
+
+  if (slideInfo.count > 1) {
+    for (let i = 0; i < slideInfo.count; i++) {
+      await page.evaluate((idx, isDeck) => {
+        let slides = document.querySelectorAll('.slide, section.slide');
+        if (!slides.length) slides = document.querySelectorAll('section');
+        if (isDeck) {
+          // Deck-based (flex + translateX): keep all slides in flow, just scroll
+          const deck = document.getElementById('deck');
+          deck.style.transition = 'none';
+          deck.style.setProperty('transform', `translateX(-${idx * 100}vw)`, 'important');
+          // Ensure all slides visible for proper flex layout
+          slides.forEach(s => {
+            s.style.setProperty('opacity', '1', 'important');
+            s.style.visibility = 'visible';
+          });
+        } else {
+          // Non-deck: show/hide
+          slides.forEach((s, j) => {
+            s.style.display = j === idx ? '' : 'none';
+            if (j === idx) s.style.visibility = 'visible';
+          });
+        }
+        // Force animations on current slide
+        const current = slides[idx];
+        if (current) {
+          current.querySelectorAll('[data-anim]').forEach(el => {
+            el.style.setProperty('opacity', '1', 'important');
+            el.style.setProperty('transition', 'none', 'important');
+            el.style.setProperty('visibility', 'visible', 'important');
+          });
+        }
+      }, i, slideInfo.hasDeck);
+      await new Promise(r => setTimeout(r, 500));
+      const img = await page.screenshot({ type: 'png', clip: { x: 0, y: 0, width: 1920, height: 1080 } });
+      screenshots.push(img);
+    }
+  } else {
+    const img = await page.screenshot({ type: 'png', clip: { x: 0, y: 0, width: 1920, height: 1080 } });
+    screenshots.push(img);
+  }
+  return screenshots;
+}
+
+// Export to PDF (screenshot-based for reliability)
+app.post('/api/export-pdf', async (req, res) => {
+  const { filePath } = req.body;
+  if (!filePath) return res.status(400).json({ error: 'Missing filePath' });
+  const resolved = path.resolve(filePath);
+  if (!fs.existsSync(resolved)) return res.status(404).json({ error: 'File not found' });
+
+  const safeName = encodeURIComponent(path.basename(resolved, '.html'));
+  let browser;
+  try {
+    ({ browser, page } = await launchAndLoad(resolved));
+    const screenshots = await screenshotAllSlides(page);
+
+    // Build an HTML page with all screenshots as full-page images, then print to PDF
+    const imagesHtml = screenshots.map((buf, i) => {
+      const b64 = buf.toString('base64');
+      const pageBreak = i < screenshots.length - 1 ? 'page-break-after:always;' : '';
+      return `<div style="width:1920px;height:1080px;${pageBreak}"><img src="data:image/png;base64,${b64}" style="width:100%;height:100%;display:block;"></div>`;
+    }).join('\n');
+
+    const pdfPage = await browser.newPage();
+    await pdfPage.setContent(`<!DOCTYPE html><html><head><style>*{margin:0;padding:0;}body{width:1920px;}</style></head><body>${imagesHtml}</body></html>`, { waitUntil: 'load' });
+
+    const pdfBuffer = await pdfPage.pdf({
+      width: '1920px',
+      height: '1080px',
+      printBackground: true,
+      margin: { top: 0, right: 0, bottom: 0, left: 0 }
+    });
+
+    res.set({ 'Content-Type': 'application/pdf', 'Content-Disposition': `attachment; filename*=UTF-8''${safeName}.pdf` });
+    res.send(Buffer.from(pdfBuffer));
+  } catch (e) {
+    console.error('[export-pdf] Error:', e.message);
+    res.status(500).json({ error: e.message });
+  } finally {
+    if (browser) await browser.close();
+  }
+});
+
+// Export to PPTX (screenshot-based)
+app.post('/api/export-pptx', async (req, res) => {
+  const { filePath } = req.body;
+  if (!filePath) return res.status(400).json({ error: 'Missing filePath' });
+  const resolved = path.resolve(filePath);
+  if (!fs.existsSync(resolved)) return res.status(404).json({ error: 'File not found' });
+
+  const safeName = encodeURIComponent(path.basename(resolved, '.html'));
+  let browser, page;
+  try {
+    ({ browser, page } = await launchAndLoad(resolved));
+    const screenshots = await screenshotAllSlides(page);
+
+    const pptx = new PptxGenJS();
+    pptx.layout = 'LAYOUT_WIDE';
+    pptx.author = 'Visual HTML Editor';
+    pptx.title = path.basename(resolved, '.html');
+
+    for (const imgBuf of screenshots) {
+      const slide = pptx.addSlide();
+      slide.addImage({ data: `image/png;base64,${imgBuf.toString('base64')}`, x: 0, y: 0, w: '100%', h: '100%' });
+    }
+
+    const pptxBuffer = await pptx.write({ outputType: 'nodebuffer' });
+    res.set({ 'Content-Type': 'application/vnd.openxmlformats-officedocument.presentationml.presentation', 'Content-Disposition': `attachment; filename*=UTF-8''${safeName}.pptx` });
+    res.send(pptxBuffer);
+  } catch (e) {
+    console.error('[export-pptx] Error:', e.message);
+    res.status(500).json({ error: e.message });
+  } finally {
+    if (browser) await browser.close();
   }
 });
 

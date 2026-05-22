@@ -26,6 +26,9 @@
     .btn-undo:disabled { opacity: 0.4; cursor: default; }
     .btn-warn { background: #f59e0b; color: #000; }
     .btn-warn:hover { background: #fbbf24; }
+    .btn-export { background: #8b5cf6; color: #fff; }
+    .btn-export:hover { background: #a78bfa; }
+    .btn-export:disabled { opacity: 0.4; cursor: default; }
     #file-display { flex: 1; font-size: 12px; color: #94a3b8; font-family: Consolas, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     #status { font-size: 12px; min-width: 100px; text-align: right; }
 
@@ -72,6 +75,8 @@
     <button class="btn-action" onclick="slideNav('next')" title="Next slide">▶</button>
   </div>
   <button class="btn-save" onclick="saveFile()">💾 Save</button>
+  <button class="btn-export" onclick="exportPDF()" title="Export to PDF">📄 PDF</button>
+  <button class="btn-export" onclick="exportPPTX()" title="Export to PPTX">📊 PPT</button>
   <button class="btn-undo" id="undo-btn" onclick="undoAction()" disabled title="Undo (Ctrl+Z)">↩ Undo</button>
   <span id="status" style="color:#94a3b8">Ready</span>
 </div>
@@ -132,6 +137,8 @@
       <div class="help-item"><span class="help-key">Drag</span> Move element position</div>
       <div class="help-item"><span class="help-key">⬆ ⬇</span> Reorder slides</div>
       <div class="help-item"><span class="help-key">💾 Save</span> Save (.bak backup)</div>
+      <div class="help-item"><span class="help-key">📄 PDF</span> Export to PDF</div>
+      <div class="help-item"><span class="help-key">📊 PPT</span> Export to PPTX</div>
     </div>
 
     <div class="help-section">
@@ -341,6 +348,52 @@
   function undoAction() {
     if (!currentFilePath) return;
     iframe.contentWindow.postMessage({ type: 'undo' }, '*');
+  }
+
+  // Export PDF
+  async function exportPDF() {
+    if (!currentFilePath) return setStatus('Open a file first', '#f59e0b');
+    setStatus('Exporting PDF...', '#8b5cf6');
+    try {
+      var res = await fetch('/api/export-pdf', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filePath: currentFilePath })
+      });
+      if (!res.ok) { var e = await res.json(); throw new Error(e.error); }
+      var blob = await res.blob();
+      var a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = currentFilePath.split('\\').pop().split('/').pop().replace(/\.html?$/i, '') + '.pdf';
+      a.click();
+      URL.revokeObjectURL(a.href);
+      setStatus('PDF exported ✓', '#10b981');
+    } catch (err) {
+      setStatus('PDF error: ' + err.message, '#ef4444');
+    }
+  }
+
+  // Export PPTX
+  async function exportPPTX() {
+    if (!currentFilePath) return setStatus('Open a file first', '#f59e0b');
+    setStatus('Exporting PPTX...', '#8b5cf6');
+    try {
+      var res = await fetch('/api/export-pptx', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filePath: currentFilePath })
+      });
+      if (!res.ok) { var e = await res.json(); throw new Error(e.error); }
+      var blob = await res.blob();
+      var a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = currentFilePath.split('\\').pop().split('/').pop().replace(/\.html?$/i, '') + '.pptx';
+      a.click();
+      URL.revokeObjectURL(a.href);
+      setStatus('PPTX exported ✓', '#10b981');
+    } catch (err) {
+      setStatus('PPTX error: ' + err.message, '#ef4444');
+    }
   }
 
   // Ctrl+Z in parent window
