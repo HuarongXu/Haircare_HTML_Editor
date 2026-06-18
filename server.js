@@ -1,6 +1,7 @@
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
+const { exec } = require('child_process');
 const puppeteer = require('puppeteer');
 const PptxGenJS = require('pptxgenjs');
 const app = express();
@@ -486,6 +487,38 @@ app.post('/api/save', (req, res) => {
 });
 
 // Browse directory
+// Resolve a pasted path (file or folder) — used by the "Go to path" box.
+// Cleans up surrounding quotes and an optional file:/// prefix, then reports
+// whether the target is a directory or an HTML file so the client can either
+// browse into the folder or open the file directly.
+app.get('/api/resolve', (req, res) => {
+  try {
+    let raw = (req.query.path || '').trim();
+    if (!raw) return res.status(400).json({ error: 'Empty path' });
+    // Strip wrapping quotes (Windows "Copy as path" adds them)
+    raw = raw.replace(/^["']|["']$/g, '').trim();
+    // Strip file:/// scheme if present
+    raw = raw.replace(/^file:\/+/i, '');
+    const resolved = path.resolve(raw);
+    if (!fs.existsSync(resolved)) {
+      return res.status(404).json({ error: 'Path not found: ' + resolved });
+    }
+    const stat = fs.statSync(resolved);
+    if (stat.isDirectory()) {
+      return res.json({ type: 'dir', path: resolved });
+    }
+    const isHtml = /\.html?$/i.test(resolved);
+    return res.json({
+      type: 'file',
+      isHtml,
+      path: resolved,
+      dir: path.dirname(resolved)
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/api/browse', (req, res) => {
   try {
     let dir = req.query.dir || __dirname;
@@ -510,7 +543,18 @@ async function launchAndLoad(resolved) {
   const page = await browser.newPage();
   await page.setViewport({ width: 1920, height: 1080 });
   const fileUrl = 'file:///' + resolved.replace(/\\/g, '/');
-  await page.goto(fileUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+  // Use 'load' (fires on DOM + resource load) instead of 'networkidle2'.
+  // 'networkidle2' can hang forever when the page keeps network connections open
+  // (e.g. external CDN fonts, web fonts, analytics) -> "Navigation timeout exceeded".
+  try {
+    await page.goto(fileUrl, { waitUntil: 'load', timeout: 60000 });
+  } catch (err) {
+    // If navigation times out, the document is usually already usable.
+    // Log and continue rather than failing the whole export.
+    console.warn('[launchAndLoad] Navigation wait timed out, continuing anyway:', err.message);
+  }
+  // Give fonts/images a brief moment to settle after load.
+  await new Promise(r => setTimeout(r, 800));
   // Force all animated elements visible
   await page.evaluate(() => {
     document.querySelectorAll('[data-anim]').forEach(el => {
@@ -663,6 +707,25 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: err.message });
 });
 
-app.listen(PORT, () => {
-  console.log(`\n  Visual HTML Editor: http://localhost:${PORT}\n`);
+const server = app.listen(PORT, () => {
+  const url = `http://localhost:${PORT}`;
+  console.log(`\n  Visual HTML Editor: ${url}\n`);
+  // Auto-open the default browser (Windows: start, macOS: open, Linux: xdg-open)
+  const opener = process.platform === 'win32' ? `start "" "${url}"`
+    : process.platform === 'darwin' ? `open "${url}"`
+    : `xdg-open "${url}"`;
+  exec(opener, (err) => {
+    if (err) console.warn('  (Could not auto-open browser — open ' + url + ' manually)');
+  });
+});
+
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`\n  Port ${PORT} is already in use.`);
+    console.error('  The editor may already be running — open http://localhost:' + PORT);
+    console.error('  Or stop the other instance, then run again.\n');
+    process.exit(1);
+  } else {
+    throw err;
+  }
 });
