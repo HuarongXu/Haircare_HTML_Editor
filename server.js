@@ -2,6 +2,7 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const { exec } = require('child_process');
+const { fileURLToPath } = require('url');
 const puppeteer = require('puppeteer');
 const PptxGenJS = require('pptxgenjs');
 const app = express();
@@ -108,6 +109,24 @@ app.get('/preview', (req, res) => {
     if (slides.length > 1) {
       window.parent.postMessage({ type: 'slide-info', current: currentSlideIndex + 1, total: slides.length }, '*');
     }
+  }
+  // Show one slide for non-transform decks. Opacity/class decks hide slides via
+  // an "active" class (e.g. .slide.active sets opacity:1); just toggling display/visibility
+  // leaves them at opacity:0 (looks black). So toggle the active class when that convention
+  // is used, otherwise fall back to display/visibility for plain JS show/hide decks.
+  function applySlideVisibility(slides, current) {
+    var usesActiveClass = Array.prototype.some.call(slides, function(s){ return s.classList.contains('active'); });
+    slides.forEach(function(s, i) {
+      var on = (i === current);
+      if (usesActiveClass) {
+        s.classList.toggle('active', on);
+        s.style.removeProperty('display');
+        s.style.removeProperty('visibility');
+      } else {
+        s.style.display = on ? '' : 'none';
+        if (on) s.style.visibility = 'visible';
+      }
+    });
   }
   var hasDeckNav = false;
   window.addEventListener('load', function() {
@@ -326,12 +345,21 @@ app.get('/preview', (req, res) => {
       if (ov) ov.remove();
       var lb = clone.querySelector('#__editor_label__');
       if (lb) lb.remove();
+      var bs = clone.querySelector('#__visual_editor_base__');
+      if (bs) bs.remove();
       clone.querySelectorAll('[contenteditable]').forEach(function(el) { el.removeAttribute('contenteditable'); });
       clone.querySelectorAll('.slide, section').forEach(function(el) {
         el.style.removeProperty('display');
         el.style.removeProperty('visibility');
+        el.style.removeProperty('opacity');
         if (!el.getAttribute('style')) el.removeAttribute('style');
       });
+      // For opacity/class-based decks, restore the active class to only the first slide
+      // so the saved file opens on slide 1 (matches how it was authored).
+      var normSlides = clone.querySelectorAll('.slide');
+      if (normSlides.length && Array.prototype.some.call(normSlides, function(s){ return s.classList.contains('active'); })) {
+        normSlides.forEach(function(s, i) { s.classList.toggle('active', i === 0); });
+      }
       var deckClone = clone.querySelector('#deck');
       if (deckClone) {
         deckClone.style.removeProperty('transform');
@@ -367,10 +395,7 @@ app.get('/preview', (req, res) => {
           document.body.classList.toggle('light-bg', isLight);
         }
       } else {
-        slides.forEach(function(s, i) {
-          s.style.display = (i === currentSlideIndex) ? '' : 'none';
-          if (i === currentSlideIndex) s.style.visibility = 'visible';
-        });
+        applySlideVisibility(slides, currentSlideIndex);
       }
       window.scrollTo(0, 0);
       reportSlideInfo();
@@ -440,10 +465,7 @@ app.get('/preview', (req, res) => {
         var deck = document.getElementById('deck');
         deck.style.transform = 'translateX(-' + (currentSlideIndex * 100) + 'vw)';
       } else {
-        getSlides().forEach(function(s, i) {
-          s.style.display = (i === currentSlideIndex) ? '' : 'none';
-          if (i === currentSlideIndex) s.style.visibility = 'visible';
-        });
+        applySlideVisibility(getSlides(), currentSlideIndex);
       }
       window.scrollTo(0, 0);
       reportSlideInfo();
@@ -460,7 +482,29 @@ app.get('/preview', (req, res) => {
   // and causes visual inconsistency between editor and direct HTML open
   const editorCSS = `<style id="__visual_editor_style__">[data-anim],[data-anim="left"],[data-anim="right"],[data-anim="line"],[data-anim="step"]{opacity:1!important;transition:none!important;}</style>`;
   html = html.replace(/<\/head>/i, editorCSS + '\n</head>');
+
+  // Inject a <base> so the previewed file's relative assets (images, css) resolve to the
+  // file's own directory instead of the editor server root (otherwise they 404).
+  const previewDir = path.dirname(resolved);
+  const dirToken = Buffer.from(previewDir).toString('base64url');
+  const baseTag = `<base id="__visual_editor_base__" href="/__asset__/${dirToken}/">`;
+  html = html.replace(/<head([^>]*)>/i, '<head$1>\n' + baseTag);
+
   res.type('html').send(html);
+});
+
+// Serve a previewed file's sibling assets (images, css, ...) by directory token.
+app.get('/__asset__/:dir/*', (req, res) => {
+  try {
+    const dir = Buffer.from(req.params.dir, 'base64url').toString('utf-8');
+    const rel = decodeURIComponent(req.params[0] || '');
+    const filePath = path.resolve(dir, rel);
+    if (!filePath.startsWith(path.resolve(dir))) return res.status(403).send('Forbidden');
+    if (!fs.existsSync(filePath)) return res.status(404).send('Not found');
+    res.sendFile(filePath);
+  } catch (e) {
+    res.status(500).send(e.message);
+  }
 });
 
 // Save file
@@ -472,6 +516,8 @@ app.post('/api/save', (req, res) => {
   // Always strip all scripts from client HTML, then re-inject originals from when file was loaded.
   // Browser DOM serialization (cloneNode+outerHTML) is unreliable for <script> preservation.
   let finalHtml = html.replace(SCRIPT_RE, '');
+  // Safety: strip the editor-injected <base> tag if it slipped through.
+  finalHtml = finalHtml.replace(/<base id="__visual_editor_base__"[^>]*>\s*/i, '');
   const origScripts = originalScriptsMap.get(resolved) || [];
   const restored = origScripts.length > 0;
   if (restored) {
@@ -568,7 +614,13 @@ async function launchAndLoad(resolved) {
   return { browser, page };
 }
 
-async function screenshotAllSlides(page) {
+// Capture every slide as a full screenshot, and (optionally) collect the
+// on-screen rect + resolved file path of any <video> elements so the caller
+// can embed the real video into a PPTX (instead of a static frame).
+// Returns { screenshots: Buffer[], slideVideos: Array<Array<{absPath,x,y,w,h}>> }
+async function screenshotAllSlides(page, opts = {}) {
+  const collectVideos = !!opts.collectVideos;
+
   const slideInfo = await page.evaluate(() => {
     let slides = document.querySelectorAll('.slide, section.slide');
     if (!slides.length) slides = document.querySelectorAll('section');
@@ -578,6 +630,65 @@ async function screenshotAllSlides(page) {
   });
 
   const screenshots = [];
+  const slideVideos = [];
+
+  // Read <video> rects + source URL on the currently-visible slide.
+  async function readVideos(idx) {
+    if (!collectVideos) return [];
+    return page.evaluate((i) => {
+      let slides = document.querySelectorAll('.slide, section.slide');
+      if (!slides.length) slides = document.querySelectorAll('section');
+      const current = slides[i];
+      if (!current) return [];
+      const out = [];
+      current.querySelectorAll('video').forEach(v => {
+        const r = v.getBoundingClientRect();
+        let src = v.currentSrc || v.src || '';
+        if (!src) {
+          const s = v.querySelector('source');
+          if (s) src = s.src || '';
+        }
+        if (r.width > 2 && r.height > 2) {
+          out.push({ src, x: r.left, y: r.top, w: r.width, h: r.height });
+        }
+      });
+      return out;
+    }, idx);
+  }
+
+  // Resolve a video src URL (file://... or relative) to an absolute disk path.
+  function resolveVideoSrc(src) {
+    if (!src) return null;
+    try {
+      if (src.startsWith('file:')) return fileURLToPath(src);
+    } catch (_) { /* fall through */ }
+    return null;
+  }
+
+  async function captureOne(idx, rawVideos) {
+    const img = await page.screenshot({ type: 'png', clip: { x: 0, y: 0, width: 1920, height: 1080 } });
+    screenshots.push(img);
+    const vids = [];
+    for (const rv of rawVideos) {
+      const absPath = resolveVideoSrc(rv.src);
+      if (!absPath || !fs.existsSync(absPath)) continue;
+      // Clamp rect into the 1920x1080 frame.
+      const x = Math.max(0, Math.round(rv.x));
+      const y = Math.max(0, Math.round(rv.y));
+      const w = Math.min(1920 - x, Math.round(rv.w));
+      const h = Math.min(1080 - y, Math.round(rv.h));
+      if (w <= 2 || h <= 2) continue;
+      // Crop the screenshot over the video region -> use as the PPT poster,
+      // so the slide looks identical to the HTML before the video is played.
+      let poster = null;
+      try {
+        const crop = await page.screenshot({ type: 'png', clip: { x, y, width: w, height: h } });
+        poster = crop.toString('base64');
+      } catch (_) { /* poster optional */ }
+      vids.push({ absPath, x, y, w, h, poster });
+    }
+    slideVideos.push(vids);
+  }
 
   if (slideInfo.count > 1) {
     for (let i = 0; i < slideInfo.count; i++) {
@@ -595,10 +706,22 @@ async function screenshotAllSlides(page) {
             s.style.visibility = 'visible';
           });
         } else {
-          // Non-deck: show/hide
+          // Non-deck: opacity/class decks use an "active" class for visibility; plain
+          // decks toggle display. Toggling only display leaves opacity:0 slides black,
+          // so the export would capture every page after the first as a blank/black frame.
+          const usesActiveClass = Array.prototype.some.call(slides, s => s.classList.contains('active'));
           slides.forEach((s, j) => {
-            s.style.display = j === idx ? '' : 'none';
-            if (j === idx) s.style.visibility = 'visible';
+            const on = j === idx;
+            if (usesActiveClass) {
+              s.classList.toggle('active', on);
+              s.style.removeProperty('display');
+              s.style.setProperty('transition', 'none', 'important');
+              s.style.setProperty('opacity', on ? '1' : '0', 'important');
+              s.style.setProperty('visibility', on ? 'visible' : 'hidden', 'important');
+            } else {
+              s.style.display = on ? '' : 'none';
+              if (on) s.style.visibility = 'visible';
+            }
           });
         }
         // Force animations on current slide
@@ -612,14 +735,14 @@ async function screenshotAllSlides(page) {
         }
       }, i, slideInfo.hasDeck);
       await new Promise(r => setTimeout(r, 500));
-      const img = await page.screenshot({ type: 'png', clip: { x: 0, y: 0, width: 1920, height: 1080 } });
-      screenshots.push(img);
+      const rawVideos = await readVideos(i);
+      await captureOne(i, rawVideos);
     }
   } else {
-    const img = await page.screenshot({ type: 'png', clip: { x: 0, y: 0, width: 1920, height: 1080 } });
-    screenshots.push(img);
+    const rawVideos = await readVideos(0);
+    await captureOne(0, rawVideos);
   }
-  return screenshots;
+  return { screenshots, slideVideos };
 }
 
 // Export to PDF (screenshot-based for reliability)
@@ -633,7 +756,7 @@ app.post('/api/export-pdf', async (req, res) => {
   let browser;
   try {
     ({ browser, page } = await launchAndLoad(resolved));
-    const screenshots = await screenshotAllSlides(page);
+    const { screenshots } = await screenshotAllSlides(page);
 
     // Build an HTML page with all screenshots as full-page images, then print to PDF
     const imagesHtml = screenshots.map((buf, i) => {
@@ -673,17 +796,45 @@ app.post('/api/export-pptx', async (req, res) => {
   let browser, page;
   try {
     ({ browser, page } = await launchAndLoad(resolved));
-    const screenshots = await screenshotAllSlides(page);
+    const { screenshots, slideVideos } = await screenshotAllSlides(page, { collectVideos: true });
 
     const pptx = new PptxGenJS();
     pptx.layout = 'LAYOUT_WIDE';
     pptx.author = 'Visual HTML Editor';
     pptx.title = path.basename(resolved, '.html');
 
-    for (const imgBuf of screenshots) {
+    // LAYOUT_WIDE = 13.333in x 7.5in; screenshots are 1920x1080 -> scale px to inches.
+    const SX = 13.333 / 1920;
+    const SY = 7.5 / 1080;
+    let embeddedVideos = 0;
+
+    for (let i = 0; i < screenshots.length; i++) {
       const slide = pptx.addSlide();
-      slide.addImage({ data: `image/png;base64,${imgBuf.toString('base64')}`, x: 0, y: 0, w: '100%', h: '100%' });
+      slide.addImage({ data: `image/png;base64,${screenshots[i].toString('base64')}`, x: 0, y: 0, w: '100%', h: '100%' });
+
+      // Embed the real video files on top of the screenshot, at their on-screen
+      // position. The cropped screenshot is used as the poster ("cover") so the
+      // slide looks identical to the HTML until the video is played.
+      const vids = (slideVideos && slideVideos[i]) || [];
+      for (const v of vids) {
+        try {
+          const opts = {
+            type: 'video',
+            path: v.absPath,
+            x: v.x * SX,
+            y: v.y * SY,
+            w: v.w * SX,
+            h: v.h * SY
+          };
+          if (v.poster) opts.cover = `image/png;base64,${v.poster}`;
+          slide.addMedia(opts);
+          embeddedVideos++;
+        } catch (mErr) {
+          console.warn('[export-pptx] Could not embed video:', v.absPath, mErr.message);
+        }
+      }
     }
+    console.log(`[export-pptx] Embedded ${embeddedVideos} video(s) across ${screenshots.length} slide(s).`);
 
     const pptxBuffer = await pptx.write({ outputType: 'nodebuffer' });
     res.set({ 'Content-Type': 'application/vnd.openxmlformats-officedocument.presentationml.presentation', 'Content-Disposition': `attachment; filename*=UTF-8''${safeName}.pptx` });
