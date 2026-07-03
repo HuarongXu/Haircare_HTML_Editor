@@ -3,3 +3,8 @@ uploads/
 *.bak
 *.bak.js
 *.bak.html
+
+# html-to-pptx skill: local venv & generated artifacts
+skills/html-to-pptx/.venv/
+skills/**/__pycache__/
+*.audited.html

@@ -1,7 +1,8 @@
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
-const { exec } = require('child_process');
+const os = require('os');
+const { exec, spawn } = require('child_process');
 const { fileURLToPath } = require('url');
 const puppeteer = require('puppeteer');
 const PptxGenJS = require('pptxgenjs');
@@ -845,6 +846,90 @@ app.post('/api/export-pptx', async (req, res) => {
   } finally {
     if (browser) await browser.close();
   }
+});
+
+// Export to PPTX (editable / vector-first) via the html-to-pptx Python skill.
+// Unlike /api/export-pptx (whole-page screenshots), this keeps text as native
+// editable PowerPoint textboxes; only complex CSS decorations fall back to
+// local snapshots. Slower, but the result is searchable/editable in PowerPoint.
+app.post('/api/export-pptx-editable', async (req, res) => {
+  const { filePath } = req.body;
+  if (!filePath) return res.status(400).json({ error: 'Missing filePath' });
+  const resolved = path.resolve(filePath);
+  if (!fs.existsSync(resolved)) return res.status(404).json({ error: 'File not found' });
+
+  const skillDir = path.join(__dirname, 'skills', 'html-to-pptx');
+  const convertPy = path.join(skillDir, 'convert.py');
+  const venvPython = process.platform === 'win32'
+    ? path.join(skillDir, '.venv', 'Scripts', 'python.exe')
+    : path.join(skillDir, '.venv', 'bin', 'python');
+  const pythonBin = fs.existsSync(venvPython) ? venvPython : 'python';
+
+  if (!fs.existsSync(convertPy)) {
+    return res.status(500).json({ error: 'html-to-pptx skill not found at ' + skillDir });
+  }
+
+  const baseName = path.basename(resolved, path.extname(resolved));
+  const safeName = encodeURIComponent(baseName);
+  const outPptx = path.join(os.tmpdir(), `htmed_${Date.now()}_${baseName}.pptx`);
+  // convert.py creates a `<name>.audited.html` working copy next to the input and,
+  // if one already exists, reuses that (possibly stale) copy. For a one-shot export
+  // we always want the current HTML, so remove any stale copy before running.
+  const auditedHtml = path.join(path.dirname(resolved), baseName + '.audited.html');
+  try { if (fs.existsSync(auditedHtml)) fs.unlinkSync(auditedHtml); } catch (_) {}
+
+  const args = [
+    convertPy,
+    resolved,
+    '--out', outPptx,
+    '--no-visual-audit',  // skip Stage 5b (needs LibreOffice / Office renderer)
+    '--no-verify'         // skip Stage 5a self-check (also needs a renderer)
+  ];
+
+  console.log('[export-pptx-editable] Running:', pythonBin, args.join(' '));
+  // Reuse Puppeteer's already-downloaded Chromium so the skill's Playwright
+  // doesn't need its own (large) browser download.
+  const childEnv = Object.assign({}, process.env);
+  childEnv.PYTHONIOENCODING = 'utf-8';
+  childEnv.PYTHONUTF8 = '1';
+  try {
+    const pupChrome = puppeteer.executablePath();
+    if (pupChrome && fs.existsSync(pupChrome)) childEnv.PW_CHROME_PATH = pupChrome;
+  } catch (_) {}
+  const child = spawn(pythonBin, args, { cwd: skillDir, env: childEnv });
+
+  let stderr = '';
+  child.stdout.on('data', d => process.stdout.write('[skill] ' + d));
+  child.stderr.on('data', d => { stderr += d; process.stderr.write('[skill] ' + d); });
+
+  const cleanup = () => {
+    try { if (fs.existsSync(outPptx)) fs.unlinkSync(outPptx); } catch (_) {}
+    // Remove the .audited.html working copy convert.py created next to the input.
+    try { if (fs.existsSync(auditedHtml)) fs.unlinkSync(auditedHtml); } catch (_) {}
+  };
+
+  child.on('error', (err) => {
+    console.error('[export-pptx-editable] spawn error:', err.message);
+    cleanup();
+    if (!res.headersSent) res.status(500).json({ error: 'Failed to start Python: ' + err.message });
+  });
+
+  child.on('close', (code) => {
+    if (code === 0 && fs.existsSync(outPptx)) {
+      const buf = fs.readFileSync(outPptx);
+      res.set({
+        'Content-Type': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+        'Content-Disposition': `attachment; filename*=UTF-8''${safeName}.pptx`
+      });
+      res.send(buf);
+      cleanup();
+    } else {
+      cleanup();
+      const msg = stderr.trim().split('\n').slice(-8).join('\n') || `convert.py exited with code ${code}`;
+      console.error('[export-pptx-editable] Failed:', msg);
+      if (!res.headersSent) res.status(500).json({ error: msg });
+    }
+  });
 });
 
 // Catch-all for unknown API routes

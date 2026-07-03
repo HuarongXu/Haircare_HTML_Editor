@@ -81,7 +81,8 @@
   </div>
   <button class="btn-save" onclick="saveFile()">💾 Save</button>
   <button class="btn-export" onclick="exportPDF()" title="Export to PDF">📄 PDF</button>
-  <button class="btn-export" onclick="exportPPTX()" title="Export to PPTX">📊 PPT</button>
+  <button class="btn-export" onclick="exportPPTX()" title="Export to PPTX (image-based, pixel-perfect)">📊 PPT</button>
+  <button class="btn-export" onclick="exportPPTXEditable()" title="Export to editable PPTX (text stays editable)">✏️ PPT可编辑</button>
   <button class="btn-undo" id="undo-btn" onclick="undoAction()" disabled title="Undo (Ctrl+Z)">↩ Undo</button>
   <span id="status" style="color:#94a3b8">Ready</span>
 </div>
@@ -428,6 +429,29 @@
       setStatus('PPTX exported ✓', '#10b981');
     } catch (err) {
       setStatus('PPTX error: ' + err.message, '#ef4444');
+    }
+  }
+
+  // Export editable PPTX (vector-first, via html-to-pptx skill). Slower.
+  async function exportPPTXEditable() {
+    if (!currentFilePath) return setStatus('Open a file first', '#f59e0b');
+    setStatus('Exporting editable PPTX (this can take a while)...', '#8b5cf6');
+    try {
+      var res = await fetch('/api/export-pptx-editable', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filePath: currentFilePath })
+      });
+      if (!res.ok) { var e = await res.json(); throw new Error(e.error); }
+      var blob = await res.blob();
+      var a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = currentFilePath.split('\\').pop().split('/').pop().replace(/\.html?$/i, '') + '.pptx';
+      a.click();
+      URL.revokeObjectURL(a.href);
+      setStatus('Editable PPTX exported ✓', '#10b981');
+    } catch (err) {
+      setStatus('Editable PPTX error: ' + err.message, '#ef4444');
     }
   }
 
