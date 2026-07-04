@@ -11,7 +11,10 @@ Usage:
 import json
 import re
 import sys
+import os
 from pathlib import Path
+from urllib.parse import urlparse, unquote
+from urllib.request import url2pathname
 
 from pptx import Presentation
 from pptx.util import Emu
@@ -1086,6 +1089,44 @@ def add_img_picture(slide, rec):
                              px_to_emu(r["h"]))
 
 
+def _local_path_from_uri(uri):
+    """Resolve a media source to an existing local file path, else None.
+
+    Accepts file:// URIs (the usual `video.currentSrc` when the deck is opened
+    from disk) as well as plain paths. blob:/http(s): sources return None so the
+    caller can fall back to the poster image.
+    """
+    if not uri:
+        return None
+    try:
+        if uri.startswith("file:"):
+            parsed = urlparse(uri)
+            # url2pathname handles Windows drive letters + %20 unescaping
+            path = url2pathname(parsed.path)
+            # urlparse keeps a leading slash before the drive letter on Windows
+            if os.name == "nt" and re.match(r"^[\\/][A-Za-z]:", path):
+                path = path[1:]
+        elif "://" in uri:
+            return None  # blob:, http:, https:, data: — not a local file
+        else:
+            path = unquote(uri)
+        return path if Path(path).exists() else None
+    except Exception:
+        return None
+
+
+def _video_mime(path):
+    ext = Path(path).suffix.lower()
+    return {
+        ".mp4": "video/mp4",
+        ".m4v": "video/mp4",
+        ".mov": "video/quicktime",
+        ".webm": "video/webm",
+        ".ogg": "video/ogg",
+        ".ogv": "video/ogg",
+    }.get(ext, "video/unknown")
+
+
 def add_canvas_picture(slide, rec):
     """canvas 元素（Chart.js / WebGL / 自绘图）→ picture 嵌入。
     measure 阶段在切到目标页后等待 canvas 像素稳定再截图。
@@ -1097,6 +1138,30 @@ def add_canvas_picture(slide, rec):
     if not png_path or not Path(png_path).exists():
         print(f"  [skip canvas] no screenshot for {rec.get('marker', '?')}")
         return
+
+    # <video>: embed the real, playable video file (poster = first-frame shot)
+    # instead of flattening it to a static picture. Falls back to a picture when
+    # the source isn't a resolvable local file (e.g. blob:/streaming URLs).
+    if rec.get("tag") == "video":
+        movie = _local_path_from_uri(rec.get("videoSrc"))
+        if movie:
+            try:
+                pic = slide.shapes.add_movie(
+                    movie,
+                    px_to_emu(r["x"]),
+                    px_to_emu(r["y"]),
+                    px_to_emu(r["w"]),
+                    px_to_emu(r["h"]),
+                    poster_frame_image=png_path,
+                    mime_type=_video_mime(movie),
+                )
+                print(f"  [video] embedded {Path(movie).name}")
+                return pic
+            except Exception as e:
+                print(f"  [video] embed failed ({e}); falling back to poster image")
+        else:
+            print(f"  [video] source not a local file for {rec.get('marker', '?')}; using poster image")
+
     pic = slide.shapes.add_picture(png_path,
                                     px_to_emu(r["x"]),
                                     px_to_emu(r["y"]),

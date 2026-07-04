@@ -459,6 +459,9 @@ EXTRACT_JS = r"""
           naturalSize: { w: el.offsetWidth, h: el.offsetHeight },
           rotation: cumulativeRotation(el),
           marker,
+          // For <video>, keep the resolved source so assemble.py can embed the
+          // real (playable) video file instead of only the poster screenshot.
+          videoSrc: tagLow === 'video' ? (el.currentSrc || el.src || '') : undefined,
         });
       }
       return;
